@@ -10,15 +10,58 @@ and response formats are fully configurable via `MCPToolMapping` without modifyi
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from ...domain.models import RegulatoryPassage, RegulatorySource
+try:
+    # `mcp` imports this in the middle of its first call, which reads files. `langgraph dev` refuses that in async code.
+    import jsonschema  # noqa: F401
+except ImportError:  # the `mcp` extra is not installed
+    pass
+
+from ...domain.models import (
+    CitationCheck,
+    RegulatoryPassage,
+    RegulatorySearch,
+    RegulatorySection,
+    RegulatorySource,
+)
 
 # Low-level async MCP tool invocation callable (allows injecting a fake transport in unit tests).
 MCPCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
+
+
+SNIPPET_END = "[...]"  # how the Handbook RAG marks text that it cut short
+NO_SUCH_SECTION = "has no section"  # how `fca-regulatory-mcp` reports a CCA section that does not exist
+
+
+class MCPToolError(RuntimeError):
+    """An MCP tool call failed. Its message must never be used as regulatory evidence."""
+
+
+def _raise_if_error(raw_result: Any) -> None:
+    """Raise if the server reported a failure (`is_error` in mcp 2.x, `isError` in mcp 1.x and JSON)."""
+    if isinstance(raw_result, dict):
+        failed = raw_result.get("is_error") is True or raw_result.get("isError") is True
+        content = raw_result.get("content") if failed else None
+    else:
+        failed = (
+            getattr(raw_result, "is_error", None) is True
+            or getattr(raw_result, "isError", None) is True
+        )
+        content = getattr(raw_result, "content", None) if failed else None
+    if not failed:
+        return
+    blocks = content if isinstance(content, list) else [content]
+    texts = [
+        block.get("text") if isinstance(block, dict) else getattr(block, "text", block)
+        for block in blocks
+    ]
+    message = "\n".join(str(text) for text in texts if text)
+    raise MCPToolError(message or "The MCP tool reported an error without a message.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +88,60 @@ class MCPToolMapping:
     top_k_arg: str | None = "top_k"
     filter_arg: str | None = None
     reference_arg: str = "reference"
+    section_tool: str | None = None  # only name tools that the server has
+    citation_tool: str | None = None
+
+
+def _unwrap_result(structured: dict[str, Any]) -> Any:
+    """The SDK puts a tool's list or text under `result`, because structured content has to be an object."""
+    return structured["result"] if set(structured) == {"result"} else structured
+
+
+def _unwrap(raw_result: Any) -> Any:
+    """What a tool returned, taken out of its MCP envelope: an SDK object, or the same thing as raw JSON."""
+    if isinstance(raw_result, dict):
+        blocks = raw_result.get("content")
+        enveloped = isinstance(blocks, list) and all(isinstance(b, dict) and "type" in b for b in blocks)
+        structured = raw_result.get("structuredContent") or raw_result.get("structured_content")
+        if isinstance(structured, dict):
+            return _unwrap_result(structured)
+        if not enveloped:
+            return raw_result
+    else:
+        for name in ("structured_content", "structuredContent"):
+            if isinstance(structured := getattr(raw_result, name, None), dict):
+                return _unwrap_result(structured)
+        blocks = getattr(raw_result, "content", None)
+        if not isinstance(blocks, list):
+            return raw_result
+    texts = [
+        block if isinstance(block, str) else block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
+        for block in blocks
+    ]
+    text = "\n".join(t for t in texts if t).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _structured(raw_result: Any, *required: str) -> dict[str, Any]:
+    """The JSON object a tool returned. Raises `MCPToolError` for an error, another shape or a missing key."""
+    _raise_if_error(raw_result)
+    payload = _unwrap(raw_result)
+    if not isinstance(payload, dict):
+        raise MCPToolError("The MCP tool did not return a JSON object.")
+    if missing := [key for key in required if key not in payload]:
+        raise MCPToolError(f"The MCP tool's result has no {', '.join(missing)}.")
+    return payload
+
+
+def _is_unknown_tool(error: MCPToolError) -> bool:
+    return str(error).startswith("Unknown tool")
+
+
+def _compact(reference: str) -> str:
+    return "".join(reference.upper().split())
 
 
 def parse_mcp_passages(
@@ -59,29 +156,20 @@ def parse_mcp_passages(
       - MCP `CallToolResult` objects with `.content` blocks (text / JSON)
       - Python lists of dicts or strings
       - Single dicts or plain-text markdown strings
+
+    An error gives no passages, because its message is not evidence. Callers that must tell a failure
+    from an empty result call `_raise_if_error` first.
     """
     payload = raw_result
 
     # Ignore MCP tool-level errors (e.g. an unknown CCA section requested by triage)
-    if getattr(payload, "isError", False):
+    try:
+        _raise_if_error(payload)
+    except MCPToolError:
         return []
 
     # Unwrap official MCP SDK CallToolResult-like objects if present
-    if hasattr(payload, "structuredContent") and payload.structuredContent is not None:
-        payload = payload.structuredContent
-    elif hasattr(payload, "content") and isinstance(payload.content, list):
-        texts = [
-            getattr(block, "text", str(block))
-            for block in payload.content
-            if getattr(block, "text", None) is not None or isinstance(block, str)
-        ]
-        combined = "\n".join(texts).strip()
-        if not combined:
-            return []
-        try:
-            payload = json.loads(combined)
-        except json.JSONDecodeError:
-            payload = combined
+    payload = _unwrap(payload)
 
     if isinstance(payload, str):
         text = payload.strip()
@@ -274,11 +362,13 @@ class MCPFCAHandbookAdapter(_BaseMCPClientAdapter):
         super().__init__(server_config=server_config, caller=caller)
         self._mapping = tool_mapping or MCPToolMapping(
             search_tool="search_fca_handbook",
-            fetch_tool="get_fca_rule",
+            fetch_tool=None,
             query_arg="query",
             top_k_arg="top_k",
             filter_arg="sourcebooks",
             reference_arg="reference",
+            section_tool="get_fca_section",
+            citation_tool="check_fca_citation",
         )
 
     async def search_rules(
@@ -288,6 +378,17 @@ class MCPFCAHandbookAdapter(_BaseMCPClientAdapter):
         sourcebooks: list[str] | None = None,
         top_k: int = 5,
     ) -> list[RegulatoryPassage]:
+        found = await self.search_rules_in_scope(query, sourcebooks=sourcebooks, top_k=top_k)
+        return found.passages
+
+    async def search_rules_in_scope(
+        self,
+        query: str,
+        *,
+        sourcebooks: list[str] | None = None,
+        top_k: int = 5,
+    ) -> RegulatorySearch:
+        """`search_rules`, and also which of `sourcebooks` the server could not search."""
         args: dict[str, Any] = {self._mapping.query_arg: query}
         if self._mapping.top_k_arg:
             args[self._mapping.top_k_arg] = top_k
@@ -295,7 +396,20 @@ class MCPFCAHandbookAdapter(_BaseMCPClientAdapter):
             args[self._mapping.filter_arg] = sourcebooks
 
         raw = await self._call_tool(self._mapping.search_tool, args)
-        return parse_mcp_passages(raw, source="fca_handbook", default_reference="FCA")
+        _raise_if_error(raw)
+        payload = _unwrap(raw)
+        passages = parse_mcp_passages(payload, source="fca_handbook", default_reference="FCA")
+        return RegulatorySearch(
+            passages=list(await asyncio.gather(*(self._in_full(p) for p in passages))),
+            not_in_index=payload.get("not_in_index", []) if isinstance(payload, dict) else [],
+        )
+
+    async def _in_full(self, passage: RegulatoryPassage) -> RegulatoryPassage:
+        """Callers of `search_rules` judge on its text, so a snippet is replaced by the whole provision."""
+        if not passage.text.endswith(SNIPPET_END) or not self._mapping.section_tool:
+            return passage
+        section = await self.get_section(passage.reference)
+        return next((p for p in section.passages if p.reference == passage.reference), passage)
 
     async def get_rule(self, reference: str) -> RegulatoryPassage | None:
         if self._mapping.fetch_tool:
@@ -303,12 +417,97 @@ class MCPFCAHandbookAdapter(_BaseMCPClientAdapter):
                 self._mapping.fetch_tool,
                 {self._mapping.reference_arg: reference},
             )
+            try:
+                _raise_if_error(raw)
+            except MCPToolError as error:
+                if not _is_unknown_tool(error) or not self._mapping.section_tool:
+                    raise
+                return await self._rule_from_section(reference)  # the Handbook RAG reads whole sections instead
             passages = parse_mcp_passages(raw, source="fca_handbook", default_reference=reference)
             return passages[0] if passages else None
+
+        if self._mapping.section_tool:
+            return await self._rule_from_section(reference)
 
         # Graceful fallback if the MCP server only exposes semantic search
         results = await self.search_rules(reference, top_k=1)
         return results[0] if results else None
+
+    async def _rule_from_section(self, reference: str) -> RegulatoryPassage | None:
+        try:
+            section = await self.get_section(reference)
+        except MCPToolError as error:
+            if "not in force in the index" in str(error) or "is not a Handbook reference" in str(error):
+                return None
+            raise
+        # Never a neighbour: the exact reference, or the same one without its type ("CONC 5.2A.4" for "CONC 5.2A.4R").
+        wanted = _compact(reference)
+        exact = [p for p in section.passages if _compact(p.reference) == wanted]
+        untyped = [
+            p
+            for p in section.passages
+            if wanted + str(p.metadata.get("provision_type") or "") == _compact(p.reference)
+        ]
+        return next(iter(exact + untyped), None)
+
+    # `FCAHandbookResearchPort`, for a reviewing agent ------------------------------------------------
+
+    async def search(
+        self,
+        query: str,
+        *,
+        sourcebooks: list[str] | None = None,
+        top_k: int = 8,
+    ) -> RegulatorySearch:
+        args: dict[str, Any] = {self._mapping.query_arg: query}
+        if self._mapping.top_k_arg:
+            args[self._mapping.top_k_arg] = top_k
+        if self._mapping.filter_arg and sourcebooks:
+            args[self._mapping.filter_arg] = sourcebooks
+        payload = _structured(await self._call_tool(self._mapping.search_tool, args), "results")
+        return RegulatorySearch(
+            passages=parse_mcp_passages(
+                {"results": payload["results"]}, source="fca_handbook", default_reference="FCA"
+            ),
+            not_in_index=payload.get("not_in_index", []),
+        )
+
+    async def get_section(self, reference: str) -> RegulatorySection:
+        if not self._mapping.section_tool:
+            raise MCPToolError("This MCP server has no tool for reading a section.")
+        payload = _structured(
+            await self._call_tool(
+                self._mapping.section_tool, {self._mapping.reference_arg: reference}
+            ),
+            "section", "results", "complete",
+        )
+        return RegulatorySection(
+            section=payload["section"],
+            passages=parse_mcp_passages(
+                {"results": payload["results"]}, source="fca_handbook", default_reference=reference
+            ),
+            complete=payload["complete"],
+            outline=payload.get("outline", []),
+            definitions=payload.get("definitions", {}),
+            links=payload.get("links", []),
+        )
+
+    async def check_citation(self, reference: str, quote: str) -> CitationCheck:
+        if not self._mapping.citation_tool:
+            raise MCPToolError("This MCP server has no tool for checking a citation.")
+        payload = _structured(
+            await self._call_tool(
+                self._mapping.citation_tool,
+                {self._mapping.reference_arg: reference, "quote": quote},
+            ),
+            "ok",
+        )
+        return CitationCheck(
+            ok=payload["ok"],
+            problems=payload.get("problems", []),
+            binding=payload.get("binding"),
+            fictional=payload.get("source") == "fictional-sample",
+        )
 
 
 class MCPConsumerCreditActAdapter(_BaseMCPClientAdapter):
@@ -351,6 +550,7 @@ class MCPConsumerCreditActAdapter(_BaseMCPClientAdapter):
             if self._mapping.filter_arg and sections:
                 args[self._mapping.filter_arg] = sections
             raw = await self._call_tool(self._mapping.search_tool, args)
+            _raise_if_error(raw)
             return parse_mcp_passages(
                 raw, source="consumer_credit_act", default_reference="CCA 1974"
             )
@@ -364,6 +564,13 @@ class MCPConsumerCreditActAdapter(_BaseMCPClientAdapter):
             if section is not None:
                 args[self._mapping.reference_arg] = section
             raw = await self._call_tool(self._mapping.fetch_tool, args)
+            try:
+                _raise_if_error(raw)
+            except MCPToolError as error:
+                # Triage can guess a section that does not exist. Any other failure must not pass unnoticed.
+                if section is not None and NO_SUCH_SECTION in str(error):
+                    return []
+                raise
             return parse_mcp_passages(
                 raw,
                 source="consumer_credit_act",

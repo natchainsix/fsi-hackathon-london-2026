@@ -21,6 +21,7 @@ from .models import (
     Finding,
     FindingsReport,
     HumanReviewDecision,
+    OutputType,
     TriagedUnit,
 )
 
@@ -42,13 +43,14 @@ class CoreAnalysisState(TypedDict, total=False):
       - Output: `findings_report`
 
     Private keys (never leak into `PipelineState`):
-      - `triaged_units`, `unit_findings`, `queries_executed`
+      - `triaged_units`, `unit_findings`, `queries_executed`, `scope_not_searched`
     """
 
     analysis_input: AnalysisInput
     triaged_units: list[TriagedUnit]
     unit_findings: Annotated[list[Finding], operator.add]
     queries_executed: Annotated[list[str], operator.add]
+    scope_not_searched: Annotated[list[str], operator.add]
     findings_report: FindingsReport
 
 
@@ -75,6 +77,7 @@ class PipelineState(TypedDict, total=False):
     require_human_approval: bool
     analysis_input: AnalysisInput
     adapter_context: dict[str, Any]
+    output_type: OutputType  # decided by the inbound adapter; the core never reads it
     findings_report: FindingsReport
     human_review: HumanReviewDecision
     deliverable_result: DeliverableResult

@@ -13,7 +13,7 @@ experiments on one dataset. See the file for how to run it.
 
 - "Problem found" needs a finding marked as a breach or potential breach. In luna's two misses it cited rules in the right
   area, but marked the findings `needs_review` or lower.
-- "Exact quotes" counts every FCA quote, checked word for word without a model. It needs an adapter with `check_citation`.
+- "Exact quotes" counts every FCA quote, checked word for word without a model.
 - The cases are few, fairly clear and written by the developer, so 10 against 12 is not strong evidence by itself. The
   quotes are the clearer difference.
 - Prices are published rates from third-party pages, not measured cost.

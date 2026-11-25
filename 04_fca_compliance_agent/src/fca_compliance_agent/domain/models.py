@@ -13,6 +13,8 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 SourceType = Literal["pr_review", "codebase", "product_spec", "custom"]
+# What the caller wants at the end. The inbound adapter decides it, and the outbound adapter delivers exactly that.
+OutputType = Literal["report", "pr_comment", "remediation_pr", "pdf_report"]
 Severity = Literal["critical", "high", "medium", "low", "info"]
 FindingStatus = Literal["non_compliant", "potential_breach", "needs_review", "observation"]
 ComplianceVerdict = Literal[
@@ -147,6 +149,33 @@ class RegulatoryCitation(BaseModel):
     url: str | None = None
 
 
+class RegulatorySearch(BaseModel):
+    """Search candidates, and any requested sourcebook that could not be searched at all."""
+
+    passages: list[RegulatoryPassage] = Field(default_factory=list)
+    not_in_index: list[str] = Field(default_factory=list)
+
+
+class RegulatorySection(BaseModel):
+    """A whole FCA Handbook section, or the part of a long one around the provision asked for."""
+
+    section: str
+    passages: list[RegulatoryPassage]
+    complete: bool = True
+    outline: list[str] = Field(default_factory=list, description="Provisions left out of a long section")
+    definitions: dict[str, str] = Field(default_factory=dict)
+    links: list[str] = Field(default_factory=list, description="References to provisions outside this section")
+
+
+class CitationCheck(BaseModel):
+    """The result of checking a quote against its source, without a model."""
+
+    ok: bool
+    problems: list[str] = Field(default_factory=list)
+    binding: bool | None = Field(default=None, description="False for guidance; None if not known")
+    fictional: bool = Field(default=False, description="True if the source is sample or mock text")
+
+
 # ---------------------------------------------------------------------------
 # Core Output Contract (Core -> HITL Gate -> Outbound Adapter)
 # ---------------------------------------------------------------------------
@@ -189,6 +218,15 @@ class FindingsReport(BaseModel):
     units_triaged_in: int = 0
     units_skipped: int = 0
     regulatory_queries_executed: list[str] = Field(default_factory=list)
+    scope_not_searched: list[str] = Field(
+        default_factory=list,
+        description="Parts of the regulatory scope that the FCA index does not hold, so no rule in them was checked",
+    )
+
+    def scope_warning(self) -> str | None:
+        if not self.scope_not_searched:
+            return None
+        return f"**Not checked:** {', '.join(self.scope_not_searched)} (not in the FCA index that was searched)"
 
     def severity_counts(self) -> dict[Severity, int]:
         counts: dict[Severity, int] = {
@@ -221,6 +259,9 @@ class DeliverableResult(BaseModel):
 
     module_name: str
     status: Literal["completed", "aborted_by_reviewer", "skipped", "failed"]
+    output_type: OutputType | None = Field(
+        default=None, description="The output that was asked for. `status` and `metadata` say whether it was delivered."
+    )
     summary: str
     artifacts: list[str] = Field(
         default_factory=list,

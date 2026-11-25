@@ -3,8 +3,8 @@
 Each case in `model_cases.jsonl` is a made-up code change, with the references a correct review should cite, or none if the
 change is fine. The whole core runs on it: triage, retrieval, the review and the summary.
 
-Start both MCP servers and set FCA_MCP_URL and CCA_MCP_URL first. Without them the mock rules are used, which do not cover
-every case. Then, from the repo root:
+It uses the real rules, as the agent does. Start the Handbook RAG first (FCA_MCP_URL, by default the local server). The
+Consumer Credit Act is read from CCA_MCP_URL if set, or else from a local server over stdio. Then, from the repo root:
 
     uv run --no-sync python 04_fca_compliance_agent/evals/model_eval.py --models openai:gpt-6-luna openai:gpt-6.2-sol
 
@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from statistics import median
@@ -28,11 +29,10 @@ from fca_compliance_agent.adapters.regulatory import (
     MCPConsumerCreditActAdapter,
     MCPFCAHandbookAdapter,
     MCPServerConfig,
-    MockConsumerCreditActAdapter,
-    MockFCAHandbookAdapter,
 )
 from fca_compliance_agent.core import build_core_analysis_subgraph
 from fca_compliance_agent.domain import AnalysisInput
+from fca_compliance_agent.mcp_server.bootstrap import DEFAULT_FCA_MCP_URL
 
 CASES = [json.loads(line) for line in (Path(__file__).parent / "model_cases.jsonl").read_text("utf-8").splitlines()]
 SCOPE = ["CONC", "PRIN 2A", "SYSC", "Consumer Credit Act 1974"]
@@ -40,10 +40,13 @@ BREACH = ("non_compliant", "potential_breach")
 
 
 def _ports() -> tuple[Any, Any]:
-    fca, cca = os.environ.get("FCA_MCP_URL"), os.environ.get("CCA_MCP_URL")
+    fca, cca = os.environ.get("FCA_MCP_URL") or DEFAULT_FCA_MCP_URL, os.environ.get("CCA_MCP_URL")
+    cca_config = MCPServerConfig(url=cca) if cca else MCPServerConfig(
+        transport="stdio", command=sys.executable, args=("-m", "fca_compliance_agent.mcp_server.server"),
+    )  # fmt: skip
     return (
-        MCPFCAHandbookAdapter(server_config=MCPServerConfig(url=fca)) if fca else MockFCAHandbookAdapter(),
-        MCPConsumerCreditActAdapter(server_config=MCPServerConfig(url=cca)) if cca else MockConsumerCreditActAdapter(),
+        MCPFCAHandbookAdapter(server_config=MCPServerConfig(url=fca)),
+        MCPConsumerCreditActAdapter(server_config=cca_config),
     )
 
 
@@ -61,7 +64,7 @@ async def review(diff: str, model: str) -> dict[str, Any]:
     findings, quotes, valid = [], 0, 0
     for found in report.findings:
         for citation in found.fca_citations:
-            if hasattr(fca, "check_citation") and citation.excerpt:
+            if citation.excerpt:
                 quotes += 1
                 valid += (await fca.check_citation(citation.reference, citation.excerpt)).ok
         findings.append({
@@ -162,7 +165,7 @@ async def main() -> None:
 
         results = await aevaluate(
             target, data=name, evaluators=EVALUATORS, experiment_prefix=model.split(":")[-1],
-            metadata={"model": model, "fca_source": "mcp" if os.environ.get("FCA_MCP_URL") else "mock"},
+            metadata={"model": model, "fca_source": "mcp"},
             max_concurrency=args.concurrency, client=client,
         )  # fmt: skip
         rows = []

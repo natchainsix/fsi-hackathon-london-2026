@@ -1,20 +1,19 @@
-"""Driven Regulatory Adapters (Mock & MCP)."""
+"""Driven Regulatory Adapters (MCP clients for FCA Handbook RAG & Consumer Credit Act)."""
 
 from .mcp import (
     MCPCaller,
     MCPConsumerCreditActAdapter,
     MCPFCAHandbookAdapter,
     MCPServerConfig,
+    MCPToolError,
     MCPToolMapping,
 )
-from .mock import MockConsumerCreditActAdapter, MockFCAHandbookAdapter
 
 __all__ = [
     "MCPCaller",
     "MCPConsumerCreditActAdapter",
     "MCPFCAHandbookAdapter",
     "MCPServerConfig",
+    "MCPToolError",
     "MCPToolMapping",
-    "MockConsumerCreditActAdapter",
-    "MockFCAHandbookAdapter",
 ]
