@@ -21,7 +21,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full architecture diagrams, port co
 │   ├── core/                        # Core map-reduce LangGraph subgraph + pipeline builder + HITL gate
 │   ├── adapters/
 │   │   ├── regulatory/              # Mock FCA/CCA knowledge bases + MCP adapters (stdio / HTTP)
-│   │   ├── llm/                     # LangChain Gateway adapter (reads MODEL_NAME & gateway keys from .env)
+│   │   ├── llm/                     # LangChain Gateway adapter (reads COMPLIANCE_MODEL_NAME & gateway keys from .env)
 │   │   ├── inbound/                 # Stub Inbound Adapter nodes for all 3 modules
 │   │   └── outbound/                # Stub Outbound Adapter nodes (incl. agentic subgraph stub for Module 2)
 │   └── agent.py                     # Composition root & default compiled graph
@@ -103,6 +103,11 @@ The HTTP server exposes all four tools at the same URL. Set both variables to th
   not that the rule does not apply.
 - **FCA content** is the mock Handbook corpus from `MockFCAHandbookAdapter`, because the Handbook text is not in this
   repo yet. Those passages carry `"corpus": "mock"`.
+
+## Model
+
+Reviews use `openai:gpt-6.2-sol`. Set `COMPLIANCE_MODEL_NAME` (as `provider:model`) in `.env` to change it. `MODEL_NAME` is
+for workshops 01–03 and does not affect this agent. See [evals](evals/README.md) for how the model was chosen.
 
 ## Swapping Context Modules
 
