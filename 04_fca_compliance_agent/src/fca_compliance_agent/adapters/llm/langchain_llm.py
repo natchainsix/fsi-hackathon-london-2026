@@ -48,6 +48,9 @@ class _UnitFindingsOutput(BaseModel):
     findings: list[_DraftFinding] = Field(default_factory=list)
 
 
+DEFAULT_MODEL = "openai:gpt-6.2-sol"
+
+
 def load_repo_env() -> None:
     """Load the repository root `.env` (matching workshops 01–03)."""
     # File lives at: <repo>/04_fca_compliance_agent/src/fca_compliance_agent/adapters/llm/langchain_llm.py
@@ -60,9 +63,12 @@ def load_repo_env() -> None:
 
 
 def resolve_default_model_name() -> str:
-    """Load `MODEL_NAME` from the repo root `.env` (matching workshops 01–03)."""
+    """The model for compliance reviews: `COMPLIANCE_MODEL_NAME`, or the default chosen by `evals/model_eval.py`.
+
+    `MODEL_NAME` is not used, because it is the small model that workshops 01–03 share.
+    """
     load_repo_env()
-    return os.environ.get("MODEL_NAME", "openai:gpt-6-luna")
+    return os.environ.get("COMPLIANCE_MODEL_NAME") or DEFAULT_MODEL
 
 
 class LangChainComplianceAnalyzer:

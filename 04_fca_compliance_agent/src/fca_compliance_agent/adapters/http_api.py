@@ -52,7 +52,7 @@ from .github_codebase import (
     render_codebase_markdown,
 )
 from .github_pr import build_github_pr_review_module
-from .llm.langchain_llm import load_repo_env
+from .llm.langchain_llm import load_repo_env, resolve_default_model_name
 from .outbound.github_client import GitHubCLIAdapter
 from .product_spec import build_product_spec_review_module
 
@@ -340,7 +340,7 @@ def create_app(
         return {
             "status": "ok",
             "default_org": resolved_org,
-            "model_name": os.environ.get("MODEL_NAME", "openai:gpt-6-luna"),
+            "model_name": resolve_default_model_name(),
             "fca_mcp_url": fca_url,
             "fca_mcp_reachable": _probe_url(fca_url),
             "cca_mcp_url": cca_url,

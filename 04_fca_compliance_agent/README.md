@@ -23,7 +23,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full architecture diagrams, port co
 │   ├── core/                        # Core map-reduce LangGraph subgraph + pipeline builder + HITL gate
 │   ├── adapters/
 │   │   ├── regulatory/              # MCP client adapters (stdio / Streamable HTTP) for FCA Handbook RAG & CCA
-│   │   ├── llm/                     # LangChain Gateway adapter (reads MODEL_NAME & gateway keys from .env)
+│   │   ├── llm/                     # LangChain Gateway adapter (reads COMPLIANCE_MODEL_NAME & gateway keys from .env)
 │   │   ├── github_pr.py             # Real PR Review inbound/outbound adapter (`gh` CLI)
 │   │   ├── chat.py                  # The combined graph: chat adapter in front of every review
 │   │   ├── output_type.py           # Decides the required output from the input
@@ -163,6 +163,11 @@ CCA_MCP_URL=http://127.0.0.1:8001/mcp
 
 Each person loads the real text first (SYSC, PRIN, COBS, CONC and the Glossary): see its README. It has no UK GDPR, so
 those rules are not searched, and the report lists that under "Not checked".
+
+## Model
+
+Reviews use `openai:gpt-6.2-sol`. Set `COMPLIANCE_MODEL_NAME` (as `provider:model`) in `.env` to change it. `MODEL_NAME` is
+for workshops 01–03 and does not affect this agent. See [evals](evals/README.md) for how the model was chosen.
 
 ## Swapping Context Modules
 
